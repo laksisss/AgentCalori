@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CaloriV2</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <h1>🔥 CaloriV2</h1>
+            <div class="date-nav">
+                <button id="prevDay" class="date-btn">◀</button>
+                <span id="currentDate" class="date-text">Сегодня</span>
+                <button id="nextDay" class="date-btn">▶</button>
+            </div>
+        </header>
+
+        <section class="calories-card">
+            <div class="calories-circle">
+                <svg viewBox="0 0 120 120">
+                    <circle class="bg" cx="60" cy="60" r="52"></circle>
+                    <circle id="caloriesProgress" class="progress" cx="60" cy="60" r="52"></circle>
+                </svg>
+                <div class="calories-text">
+                    <span id="caloriesCurrent" class="big">0</span>
+                    <span class="small">/ <span id="caloriesGoal">2000</span> ккал</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="macros">
+            <div class="macro-item protein">
+                <div class="macro-label">🥩 Белки</div>
+                <div class="macro-bar"><div id="proteinBar" class="macro-fill"></div></div>
+                <div class="macro-values"><span id="proteinCurrent">0</span>г / <span id="proteinGoal">100</span>г</div>
+            </div>
+            <div class="macro-item fat">
+                <div class="macro-label">🥑 Жиры</div>
+                <div class="macro-bar"><div id="fatBar" class="macro-fill"></div></div>
+                <div class="macro-values"><span id="fatCurrent">0</span>г / <span id="fatGoal">70</span>г</div>
+            </div>
+            <div class="macro-item carbs">
+                <div class="macro-label">🍞 Углеводы</div>
+                <div class="macro-bar"><div id="carbsBar" class="macro-fill"></div></div>
+                <div class="macro-values"><span id="carbsCurrent">0</span>г / <span id="carbsGoal">250</span>г</div>
+            </div>
+        </section>
+
+        <section class="meals-section">
+            <h2>📅 Приёмы пищи</h2>
+            <div id="mealsList" class="meals-list">
+                <div class="empty">Пока пусто. Отправь фото или текст боту!</div>
+            </div>
+        </section>
+
+        <div class="add-button-container">
+            <button id="addMealBtn" class="add-btn">↩️ Вернуться в чат</button>
+        </div>
+    </div>
+    <script src="/static/app.js"></script>
+</body>
+</html>

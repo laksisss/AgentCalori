@@ -1,0 +1,92 @@
+:root {
+    --bg-color: var(--tg-theme-bg-color, #ffffff);
+    --text-color: var(--tg-theme-text-color, #000000);
+    --hint-color: var(--tg-theme-hint-color, #999999);
+    --button-color: var(--tg-theme-button-color, #3390ec);
+    --button-text-color: var(--tg-theme-button-text-color, #ffffff);
+    --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg-color);
+    color: var(--text-color);
+    padding: 16px;
+    padding-bottom: 100px;
+}
+
+.app { max-width: 480px; margin: 0 auto; }
+
+.header { text-align: center; margin-bottom: 20px; }
+.header h1 { font-size: 24px; margin-bottom: 12px; }
+
+.date-nav {
+    display: flex; align-items: center; justify-content: center; gap: 16px;
+}
+.date-btn {
+    background: var(--secondary-bg); border: none; border-radius: 50%;
+    width: 36px; height: 36px; font-size: 16px; cursor: pointer;
+    color: var(--text-color); display: flex; align-items: center; justify-content: center;
+}
+.date-text { font-size: 16px; font-weight: 500; min-width: 120px; }
+
+.calories-card { display: flex; justify-content: center; margin-bottom: 24px; }
+.calories-circle { position: relative; width: 180px; height: 180px; }
+.calories-circle svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+.calories-circle .bg { fill: none; stroke: var(--secondary-bg); stroke-width: 10; }
+.calories-circle .progress {
+    fill: none; stroke: var(--button-color); stroke-width: 10;
+    stroke-linecap: round; stroke-dasharray: 326.7; stroke-dashoffset: 326.7;
+    transition: stroke-dashoffset 1s ease;
+}
+.calories-text {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%); text-align: center;
+    display: flex; flex-direction: column;
+}
+.calories-text .big { font-size: 32px; font-weight: 700; line-height: 1; }
+.calories-text .small { font-size: 14px; color: var(--hint-color); margin-top: 4px; }
+
+.macros { display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px; }
+.macro-item { background: var(--secondary-bg); border-radius: 12px; padding: 12px 16px; }
+.macro-label { font-size: 14px; font-weight: 500; margin-bottom: 8px; }
+.macro-bar {
+    height: 8px; background: rgba(0,0,0,0.1);
+    border-radius: 4px; overflow: hidden; margin-bottom: 6px;
+}
+.macro-fill { height: 100%; border-radius: 4px; transition: width 1s ease; }
+.protein .macro-fill { background: #4CAF50; }
+.fat .macro-fill { background: #FF9800; }
+.carbs .macro-fill { background: #2196F3; }
+.macro-values { font-size: 13px; color: var(--hint-color); }
+
+.meals-section h2 { font-size: 18px; margin-bottom: 12px; }
+.meals-list { display: flex; flex-direction: column; gap: 8px; }
+.meal-card {
+    background: var(--secondary-bg); border-radius: 12px;
+    padding: 12px 16px; display: flex; justify-content: space-between; align-items: center;
+}
+.meal-info { flex: 1; }
+.meal-name { font-weight: 500; font-size: 15px; margin-bottom: 4px; }
+.meal-details { font-size: 13px; color: var(--hint-color); }
+.meal-calories { font-weight: 600; font-size: 15px; white-space: nowrap; margin-left: 12px; }
+.meal-type-badge {
+    display: inline-block; font-size: 11px; padding: 2px 8px;
+    border-radius: 10px; background: var(--button-color);
+    color: var(--button-text-color); margin-left: 8px;
+}
+.empty { text-align: center; color: var(--hint-color); padding: 24px; font-size: 14px; }
+
+.add-button-container {
+    position: fixed; bottom: 16px; left: 0; right: 0;
+    padding: 0 16px; max-width: 480px; margin: 0 auto;
+}
+.add-btn {
+    width: 100%; padding: 16px; background: var(--button-color);
+    color: var(--button-text-color); border: none; border-radius: 12px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+.add-btn:active { transform: scale(0.98); }
