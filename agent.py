@@ -27,10 +27,10 @@ async def _gigachat_chat(messages: list, tools: list = None, temperature: float 
     
     def _call():
         kwargs = {
-            "model": "GigaChat",
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "messages": messages,  # ✅ есть
+            "temperature": temperature,  # ✅ есть
+            "max_tokens": max_tokens,  # ✅ есть
+            # ❌ УБЕРИ ЭТУ СТРОКУ: "model": "GigaChat",
         }
         if tools:
             kwargs["tools"] = tools
