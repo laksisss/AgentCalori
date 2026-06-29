@@ -1,22 +1,19 @@
 """
 agent.py — ядро агента с расширенными возможностями.
-
 Новое по сравнению с предыдущей версией:
-  - Расширенный SYSTEM_PROMPT: агент умеет разговаривать, знает свои возможности
-  - Tool: analyze_meal_quality — разбор качества питания за день
-  - Tool: suggest_meal — предлагает что съесть исходя из остатка КБЖУ
-  - Tool: compare_with_yesterday — сравнение сегодня со вчера
+Расширенный SYSTEM_PROMPT: агент умеет разговаривать, знает свои возможности
+Tool: analyze_meal_quality — разбор качества питания за день
+Tool: suggest_meal — предлагает что съесть исходя из остатка КБЖУ
+Tool: compare_with_yesterday — сравнение сегодня со вчера
+Tool: generate_human_feedback — генерирует человеческий комментарий по качеству питания
 """
-
 import json
 import logging
 from groq import AsyncGroq
 from config import GROQ_API_KEY, TELEGRAM_TOKEN
-
 logger = logging.getLogger(__name__)
 
-# ─── Tools ────────────────────────────────────────────────────────────────────
-
+─── Tools ────────────────────────────────────────────────────────────────────
 TOOLS = [
     {
         "type": "function",
@@ -171,14 +168,32 @@ TOOLS = [
                 "required": ["user_id"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_human_feedback",
+            "description": "Генерирует короткий человеческий комментарий по качеству питания",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "total_calories": {"type": "number", "description": "Всего калорий съедено"},
+                    "protein": {"type": "number", "description": "Белки"},
+                    "fats": {"type": "number", "description": "Жиры"},
+                    "carbs": {"type": "number", "description": "Углеводы"},
+                    "remaining_calories": {"type": "number", "description": "Остаток калорий"}
+                },
+                "required": ["total_calories", "protein", "fats", "carbs"]
+            }
+        }
     }
 ]
 
-# ─── System prompt ─────────────────────────────────────────────────────────────
-
+─── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Ты — персональный нутриционист и пищевой трекер в Telegram. Тебя зовут Калори.
 
 ━━━ ЧТО ТЫ УМЕЕШЬ ━━━
+
 - Логировать еду по тексту ("съел гречку 200г с курицей") или фото
 - Считать КБЖУ и остаток до дневной нормы
 - Анализировать качество питания за день — баланс, пропуски, проблемы
@@ -188,38 +203,68 @@ SYSTEM_PROMPT = """Ты — персональный нутриционист и
 - Удалять последнюю запись если ошибся
 
 ━━━ КАК ТЫ ОБЩАЕШЬСЯ ━━━
-- Коротко и по делу, без воды и капитанства
-- Если пользователь просто болтает или задаёт общий вопрос — отвечаешь как человек, не превращаешь каждое сообщение в задачу трекинга
+
+- **ВСЕГДА отвечай на вопросы пользователя** — даже если они в конце сообщения про еду
+- Коротко и по делу, без воды
+- **Когда человек описывает что съел — всегда подтверждай запись** и показывай остаток
+- **Добавляй человеческую реакцию**: "норм", "можно лучше", "отлично", "многовато жиров" и т.д.
 - Если спрашивают что ты умеешь — отвечаешь списком из блока выше
-- Можешь иногда сам замечать паттерны: "кстати, сегодня ты ещё не ел белка"
-- Если данных нет — честно говоришь об этом, не выдумываешь
+- Можешь замечать паттерны: "кстати, сегодня ты ещё не ел белка"
+- Если данных нет — честно говоришь об этом
 
 ━━━ ПРАВИЛА ЛОГИРОВАНИЯ ━━━
-- Всегда сохраняй еду в базу после анализа (save_meal)
-- Тип приёма пищи определяй по времени суток или из контекста, не спрашивай если очевидно
-- Если несколько продуктов — суммируй КБЖУ и сохраняй одной записью с общим названием
-- После сохранения всегда показывай остаток до нормы если у пользователя есть цель
 
-━━━ ФОРМАТ ПОСЛЕ ЛОГИРОВАНИЯ ━━━
+- **ВСЕГДА сохраняй еду в базу** после анализа (save_meal)
+- Тип приёма пищи определяй по времени или контексту, не спрашивай
+- Если несколько продуктов — суммируй КБЖУ одной записью
+**ВАЖНО:** После логирования всегда отвечай на ВСЕ вопросы из сообщения пользователя
+
+━━━ ФОРМАТ ОТВЕТА ━━━
+
+Когда логируешь еду:
+
 ✅ [Название] — [калории] ккал
 Б: [белки]г | Ж: [жиры]г | У: [углеводы]г
-До нормы осталось [X] ккал  ← только если есть цель
+До нормы осталось [X] ккал
+[Ответ на вопросы пользователя если они были]
+[Небольшой комментарий по качеству если уместно]
+
+Когда отвечаешь на вопрос:
+
+[Ответ по делу]
+[Дополнительная полезная инфа если есть]
+
+━━━ ПРИМЕРЫ ━━━
+
+**Пользователь:** "съел плов 200г и борщ 300г, норм?"
+
+**Ты:**
+
+✅ Плов, борщ — 810 ккал
+Б: 43г | Ж: 19г | У: 135г
+До нормы осталось 1190 ккал
+В целом норм, но многовато углеводов. Советую вечером добавить белка.
+
+**Пользователь:** "а че еще можно покушать сегодня?"
+
+**Ты:**
+
+[Анализируешь остаток КБЖУ]
+Тебе стоит съесть что-то с высоким содержанием жиров и углеводов, низким содержанием белка. Например, орехи или фрукты.
 
 ━━━ ВАЖНО ━━━
+
 Ты работаешь с реальными данными из базы. Никогда не выдумывай цифры.
-Если данных нет — скажи об этом прямо.
+**Всегда поддерживай диалог** — ты не просто трекер, ты помощник который общается.
 """
 
-# ─── Tool executors ────────────────────────────────────────────────────────────
-
+─── Tool executors ────────────────────────────────────────────────────────────
 async def _tool_analyze_food_text(args: dict) -> dict:
     client = AsyncGroq(api_key=GROQ_API_KEY)
     prompt = f"""Проанализируй еду и верни ТОЛЬКО JSON без пояснений.
 Еда: {args['text']}
-
 Формат (один объект или массив если несколько блюд):
-{{"name": "название", "weight": 150, "calories": 300, "protein": 20, "fat": 10, "carbs": 30}}"""
-
+{{ "name": "название", "weight": 150, "calories": 300, "protein": 20, "fat": 10, "carbs": 30}}"""
     response = await client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
@@ -256,7 +301,6 @@ async def _tool_analyze_food_text(args: dict) -> dict:
         }
     return data
 
-
 async def _tool_get_today_meals(args: dict) -> dict:
     from sqlalchemy import select
     from database import async_session
@@ -264,6 +308,7 @@ async def _tool_get_today_meals(args: dict) -> dict:
     import datetime
 
     today = datetime.date.today().isoformat()
+
     async with async_session() as session:
         result = await session.execute(
             select(Meal).where(
@@ -299,7 +344,6 @@ async def _tool_get_today_meals(args: dict) -> dict:
 
     return {"meals": meal_list, "totals": totals}
 
-
 async def _tool_get_user_goal(args: dict) -> dict:
     from sqlalchemy import select
     from database import async_session
@@ -322,13 +366,13 @@ async def _tool_get_user_goal(args: dict) -> dict:
         "is_default": False
     }
 
-
 async def _tool_save_meal(args: dict) -> dict:
     from database import async_session
     from models import Meal
     import datetime
 
     today = datetime.date.today().isoformat()
+
     async with async_session() as session:
         meal = Meal(
             user_id=args["user_id"],
@@ -347,7 +391,6 @@ async def _tool_save_meal(args: dict) -> dict:
 
     return {"success": True, "meal_id": meal.id, "saved": args["name"]}
 
-
 async def _tool_get_week_summary(args: dict) -> dict:
     from sqlalchemy import select
     from database import async_session
@@ -356,6 +399,7 @@ async def _tool_get_week_summary(args: dict) -> dict:
 
     today = datetime.date.today()
     days = []
+
     async with async_session() as session:
         for i in range(7):
             day = (today - datetime.timedelta(days=i)).isoformat()
@@ -377,7 +421,6 @@ async def _tool_get_week_summary(args: dict) -> dict:
 
     return {"days": days}
 
-
 async def _tool_delete_last_meal(args: dict) -> dict:
     from sqlalchemy import select
     from database import async_session
@@ -385,6 +428,7 @@ async def _tool_delete_last_meal(args: dict) -> dict:
     import datetime
 
     today = datetime.date.today().isoformat()
+
     async with async_session() as session:
         result = await session.execute(
             select(Meal).where(
@@ -393,14 +437,15 @@ async def _tool_delete_last_meal(args: dict) -> dict:
             ).order_by(Meal.created_at.desc()).limit(1)
         )
         meal = result.scalar_one_or_none()
+
         if not meal:
             return {"success": False, "message": "Нет записей за сегодня"}
+
         name = meal.name
         await session.delete(meal)
         await session.commit()
 
     return {"success": True, "deleted": name}
-
 
 async def _tool_analyze_meal_quality(args: dict) -> dict:
     """
@@ -460,7 +505,6 @@ async def _tool_analyze_meal_quality(args: dict) -> dict:
         "meals_list": [m["name"] for m in meals]
     }
 
-
 async def _tool_suggest_meal(args: dict) -> dict:
     """
     Считает остаток КБЖУ и возвращает данные для рекомендации.
@@ -491,7 +535,6 @@ async def _tool_suggest_meal(args: dict) -> dict:
         "goal": goal,
         "totals_so_far": totals
     }
-
 
 async def _tool_compare_with_yesterday(args: dict) -> dict:
     """Сравнивает сегодня и вчера по КБЖУ"""
@@ -539,9 +582,33 @@ async def _tool_compare_with_yesterday(args: dict) -> dict:
         "goal": goal_data
     }
 
+async def _tool_generate_human_feedback(args: dict) -> str:
+    """Генерирует человеческий комментарий"""
+    total = args.get('total_calories', 0)
+    protein = args.get('protein', 0)
+    fats = args.get('fats', 0)
+    carbs = args.get('carbs', 0)
+    remaining = args.get('remaining_calories', 0)
+    
+    comments = []
+    
+    if carbs > 150:
+        comments.append("многовато углеводов сегодня 🍞")
+    if protein < 30:
+        comments.append("маловато белка, добавь мясо/рыбу 🥩")
+    if fats > 80:
+        comments.append("жиров перебор, осторожнее с маслом 🥑")
+    if remaining < 200 and total > 0:
+        comments.append("почти уложился в норму! 👍")
+    if total == 0:
+        return "Пока ничего не съел, начинай день!"
+    
+    if not comments:
+        comments.append("всё отлично, так держать! 💪")
+    
+    return " ".join(comments)
 
-# ─── Tool dispatcher ───────────────────────────────────────────────────────────
-
+─── Tool dispatcher ───────────────────────────────────────────────────────────
 TOOL_EXECUTORS = {
     "analyze_food_text": _tool_analyze_food_text,
     "get_today_meals": _tool_get_today_meals,
@@ -552,8 +619,8 @@ TOOL_EXECUTORS = {
     "analyze_meal_quality": _tool_analyze_meal_quality,
     "suggest_meal": _tool_suggest_meal,
     "compare_with_yesterday": _tool_compare_with_yesterday,
+    "generate_human_feedback": _tool_generate_human_feedback,
 }
-
 
 async def execute_tool(tool_name: str, tool_args: dict) -> str:
     executor = TOOL_EXECUTORS.get(tool_name)
@@ -566,9 +633,7 @@ async def execute_tool(tool_name: str, tool_args: dict) -> str:
         logger.error(f"Tool {tool_name} error: {e}", exc_info=True)
         return json.dumps({"error": str(e)})
 
-
-# ─── ReAct loop ────────────────────────────────────────────────────────────────
-
+─── ReAct loop ────────────────────────────────────────────────────────────────
 async def run_agent(
     user_id: int,
     message: str,
@@ -644,7 +709,6 @@ async def run_agent(
 
     return "Не удалось обработать запрос. Попробуй ещё раз."
 
-
 async def _analyze_photo_with_vision(client: AsyncGroq, photo_base64: str, hint: str = "") -> str:
     response = await client.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",
@@ -656,7 +720,7 @@ async def _analyze_photo_with_vision(client: AsyncGroq, photo_base64: str, hint:
                         "type": "text",
                         "text": (
                             "Проанализируй фото еды. Верни ТОЛЬКО JSON:\n"
-                            '{"name": "блюдо", "weight": 200, "calories": 300, "protein": 24, "fat": 10, "carbs": 36}\n'
+                            '{ "name": "блюдо", "weight": 200, "calories": 300, "protein": 24, "fat": 10, "carbs": 36}\n'
                             f"Подсказка от пользователя: {hint or 'нет'}"
                         )
                     },
