@@ -14,8 +14,16 @@ logger = logging.getLogger(__name__)
 
 async def _gigachat_chat(messages: list, tools: list = None, temperature: float = 0.4, max_tokens: int = 1200):
     """Прямой вызов GigaChat API через HTTP (асинхронно)."""
-    # Получаем токен
-    async with httpx.AsyncClient() as client:
+    import ssl
+    
+    # Создаём SSL контекст без проверки сертификатов
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    # Создаём httpx клиент с отключенной проверкой SSL
+    async with httpx.AsyncClient(verify=False) as client:
+        # Получаем токен
         token_resp = await client.post(
             "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
             headers={
