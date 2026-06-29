@@ -1,25 +1,65 @@
 """
-agent.py — ядро агента с расширенными возможностями.
+agent.py — ядро агента с GigaChat и базой продуктов.
 """
 import json
 import logging
-from groq import AsyncGroq
-from config import GROQ_API_KEY, TELEGRAM_TOKEN
+import re
+from gigachat import GigaChat
+from gigachat.models import Messages
+from config import GIGACHAT_CREDENTIALS
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Tools ────────────────────────────────────────────────────────────────────
+def get_gigachat_client():
+    """Создаёт клиента GigaChat."""
+    return GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False)
+
+
+# ─── Tools ───────────────────────────────────────────────────────────────────
 TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "analyze_food_text",
-            "description": "Анализирует текстовое описание еды и возвращает КБЖУ. Используй когда пользователь описывает что съел текстом.",
+            "name": "search_product",
+            "description": "Ищет продукт в базе по имени. ВСЕГДА вызывай ПЕРЕД analyze_food_text. Возвращает КБЖУ на 100г если найден.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "text": {"type": "string", "description": "Описание еды от пользователя"}
+                    "name": {"type": "string", "description": "Название продукта для поиска"}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_product",
+            "description": "Сохраняет/обновляет продукт в базе. Используй после LLM-анализа чтобы запомнить КБЖУ навсегда. Также вызывай когда пользователь поправил цифры.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "calories": {"type": "number", "description": "Калории на 100г"},
+                    "protein": {"type": "number"},
+                    "fat": {"type": "number"},
+                    "carbs": {"type": "number"},
+                    "user_id": {"type": "integer", "description": "Telegram ID пользователя"}
+                },
+                "required": ["name", "calories", "protein", "fat", "carbs"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_food_text",
+            "description": "Анализирует еду через LLM. Используй ТОЛЬКО если search_product не нашёл продукт. После вызова обязательно сохрани результат через save_product!",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string"}
                 },
                 "required": ["text"]
             }
@@ -29,11 +69,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_today_meals",
-            "description": "Получает все приёмы пищи пользователя за сегодня. Используй для статистики, анализа, вопросов о сегодняшнем дне.",
+            "description": "Все приёмы пищи за сегодня.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "integer", "description": "Telegram ID пользователя"}
+                    "user_id": {"type": "integer"}
                 },
                 "required": ["user_id"]
             }
@@ -43,11 +83,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_user_goal",
-            "description": "Получает цели пользователя по калориям и БЖУ.",
+            "description": "Цели пользователя по КБЖУ.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "integer", "description": "Telegram ID пользователя"}
+                    "user_id": {"type": "integer"}
                 },
                 "required": ["user_id"]
             }
@@ -57,21 +97,18 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "save_meal",
-            "description": "Сохраняет приём пищи в базу. Используй после анализа еды. ВАЖНО: всегда вызывай этот tool после анализа чтобы записать продукт.",
+            "description": "Сохраняет приём пищи в базу. ВСЕГДА вызывай после анализа еды!",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_id": {"type": "integer", "description": "Telegram ID пользователя"},
-                    "name": {"type": "string", "description": "Название блюда"},
+                    "user_id": {"type": "integer"},
+                    "name": {"type": "string"},
                     "calories": {"type": "number"},
                     "protein": {"type": "number"},
                     "fat": {"type": "number"},
                     "carbs": {"type": "number"},
                     "weight": {"type": "number"},
-                    "meal_type": {
-                        "type": "string",
-                        "enum": ["breakfast", "lunch", "dinner", "snack"]
-                    }
+                    "meal_type": {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]}
                 },
                 "required": ["user_id", "name", "calories", "protein", "fat", "carbs"]
             }
@@ -81,12 +118,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_week_summary",
-            "description": "Сводка питания за 7 дней. Используй для недельной статистики и анализа динамики.",
+            "description": "Сводка за 7 дней.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "user_id": {"type": "integer"}
-                },
+                "properties": {"user_id": {"type": "integer"}},
                 "required": ["user_id"]
             }
         }
@@ -95,12 +130,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "delete_last_meal",
-            "description": "Удаляет последний приём пищи за сегодня. Используй когда пользователь просит отменить или удалить последнюю запись.",
+            "description": "Удаляет последнюю запись за сегодня.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "user_id": {"type": "integer"}
-                },
+                "properties": {"user_id": {"type": "integer"}},
                 "required": ["user_id"]
             }
         }
@@ -109,12 +142,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "analyze_meal_quality",
-            "description": "Анализирует качество питания за сегодня: баланс БЖУ, достаточность калорий, пропущенные приёмы пищи, проблемные нутриенты.",
+            "description": "Анализ качества питания за сегодня.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "user_id": {"type": "integer"}
-                },
+                "properties": {"user_id": {"type": "integer"}},
                 "required": ["user_id"]
             }
         }
@@ -123,16 +154,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "suggest_meal",
-            "description": "Предлагает что съесть исходя из остатка КБЖУ на сегодня.",
+            "description": "Что съесть исходя из остатка КБЖУ.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "user_id": {"type": "integer"},
-                    "meal_type": {
-                        "type": "string",
-                        "enum": ["breakfast", "lunch", "dinner", "snack", "any"],
-                        "description": "Тип приёма пищи для которого нужна рекомендация"
-                    }
+                    "meal_type": {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack", "any"]}
                 },
                 "required": ["user_id"]
             }
@@ -142,12 +169,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "compare_with_yesterday",
-            "description": "Сравнивает питание сегодня со вчерашним днём.",
+            "description": "Сравнение сегодня со вчера.",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "user_id": {"type": "integer"}
-                },
+                "properties": {"user_id": {"type": "integer"}},
                 "required": ["user_id"]
             }
         }
@@ -156,15 +181,15 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "generate_human_feedback",
-            "description": "Генерирует короткий человеческий комментарий по качеству питания.",
+            "description": "Короткий человеческий комментарий по питанию.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "total_calories": {"type": "number", "description": "Всего калорий съедено за сегодня"},
-                    "protein": {"type": "number", "description": "Белки за сегодня"},
-                    "fats": {"type": "number", "description": "Жиры за сегодня"},
-                    "carbs": {"type": "number", "description": "Углеводы за сегодня"},
-                    "remaining_calories": {"type": "number", "description": "Остаток калорий до нормы"}
+                    "total_calories": {"type": "number"},
+                    "protein": {"type": "number"},
+                    "fats": {"type": "number"},
+                    "carbs": {"type": "number"},
+                    "remaining_calories": {"type": "number"}
                 },
                 "required": ["total_calories", "protein", "fats", "carbs"]
             }
@@ -179,69 +204,158 @@ SYSTEM_PROMPT = """Ты — персональный нутриционист и
 ━━━ ЧТО ТЫ УМЕЕШЬ ━━━
 - Логировать еду по тексту ("съел гречку 200г с курицей") или фото
 - Считать КБЖУ и остаток до дневной нормы
-- Анализировать качество питания за день — баланс, пропуски, проблемы
+- Анализировать качество питания за день
 - Предлагать что съесть исходя из остатка нутриентов
 - Показывать статистику за день и неделю
 - Сравнивать сегодня со вчера
 - Удалять последнюю запись если ошибся
+- Запоминать продукты в базе чтобы не спрашивать повторно
+
+━━━ АЛГОРИТМ ЛОГИРОВАНИЯ ЕДЫ (ОБЯЗАТЕЛЬНО!) ━━━
+1. Когда пользователь пишет про еду — СНАЧАЛА вызови search_product(name)
+2. Если продукт найден — используй его КБЖУ (на 100г) и пересчитай на указанный вес
+3. Если НЕ найден — ТОЛЬКО ТОГДА вызывай analyze_food_text
+4. После analyze_food_text ОБЯЗАТЕЛЬНО вызови save_product чтобы запомнить КБЖУ навсегда
+5. Если пользователь поправил цифры — вызови save_product с новыми данными
+6. В конце ВСЕГДА вызови save_meal для записи в дневник
 
 ━━━ КАК ТЫ ОБЩАЕШЬСЯ ━━━
-- ВСЕГДА отвечай на вопросы пользователя — даже если они в конце сообщения про еду
+- ВСЕГДА отвечай на вопросы пользователя
 - Коротко и по делу, без воды
-- Когда человек описывает что съел — всегда подтверждай запись и показывай остаток
-- Добавляй человеческую реакцию: "норм", "можно лучше", "отлично", "многовато жиров" и т.д.
-- Если спрашивают что ты умеешь — отвечаешь списком из блока выше
+- Подтверждай запись еды и показывай остаток
+- Добавляй человеческую реакцию через generate_human_feedback
 - Можешь замечать паттерны: "кстати, сегодня ты ещё не ел белка"
-- Если данных нет — честно говоришь об этом
 
-━━━ ПРАВИЛА ЛОГИРОВАНИЯ ━━━
-- ВСЕГДА сохраняй еду в базу после анализа (save_meal) — это критически важно!
-- Тип приёма пищи определяй по времени или контексту, не спрашивай
-- Если несколько продуктов — суммируй КБЖУ одной записью
-- ВАЖНО: После логирования всегда отвечай на ВСЕ вопросы из сообщения пользователя
-
-━━━ ФОРМАТ ОТВЕТА ━━━
-Когда логируешь еду:
+━━━ ФОРМАТ ОТВЕТА ПРИ ЛОГИРОВАНИИ ━━━
 ✅ [Название] — [калории] ккал
 Б: [белки]г | Ж: [жиры]г | У: [углеводы]г
 До нормы осталось [X] ккал
-[Ответ на вопросы пользователя если они были]
-[Небольшой комментарий по качеству если уместно]
-
-Когда отвечаешь на вопрос:
-[Ответ по делу]
-[Дополнительная полезная инфа если есть]
-
-━━━ ПРИМЕРЫ ━━━
-Пользователь: "съел плов 200г и борщ 300г, норм?"
-Ты:
-✅ Плов, борщ — 810 ккал
-Б: 43г | Ж: 19г | У: 135г
-До нормы осталось 1190 ккал
-В целом норм, но многовато углеводов. Советую вечером добавить белка.
+[Ответ на вопросы]
+[Комментарий]
 
 ━━━ ВАЖНО ━━━
-Ты работаешь с реальными данными из базы. Никогда не выдумывай цифры.
-Всегда поддерживай диалог — ты не просто трекер, ты помощник который общается.
-ВСЕГДА вызывай save_meal после анализа еды иначе продукт не запишется!
+- Работай с реальными данными из базы
+- Никогда не выдумывай цифры если есть данные в базе
+- Всегда поддерживай диалог
+- КЕШИРУЙ все новые продукты через save_product!
 """
 
 
 # ─── Tool executors ───────────────────────────────────────────────────────────
+def _normalize_name(name: str) -> str:
+    """Нормализует название продукта для поиска."""
+    name = name.lower().strip()
+    name = re.sub(r'[^\wа-яё\s]', '', name)
+    name = re.sub(r'\s+', ' ', name)
+    return name
+
+
+async def _tool_search_product(args: dict) -> dict:
+    """Ищет продукт в базе по имени."""
+    from sqlalchemy import select
+    from database import async_session
+    from models import Product
+
+    name = args.get("name", "")
+    normalized = _normalize_name(name)
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Product).where(Product.name == normalized)
+        )
+        product = result.scalar_one_or_none()
+
+        if not product:
+            result = await session.execute(
+                select(Product).where(Product.name.like(f"%{normalized}%"))
+            )
+            product = result.scalars().first()
+
+        if not product:
+            return {"found": False, "name": name}
+
+        return {
+            "found": True,
+            "name": product.display_name,
+            "calories_per_100g": product.calories,
+            "protein_per_100g": product.protein,
+            "fat_per_100g": product.fat,
+            "carbs_per_100g": product.carbs,
+            "source": product.source,
+            "hint": "Используй эти данные и пересчитай на вес блюда"
+        }
+
+
+async def _tool_save_product(args: dict) -> dict:
+    """Сохраняет/обновляет продукт в базе."""
+    from sqlalchemy import select
+    from database import async_session
+    from models import Product
+
+    name = args.get("name", "")
+    normalized = _normalize_name(name)
+    display_name = name
+
+    async with async_session() as session:
+        result = await session.execute(
+            select(Product).where(Product.name == normalized)
+        )
+        product = result.scalar_one_or_none()
+
+        if product:
+            product.calories = args.get("calories", product.calories)
+            product.protein = args.get("protein", product.protein)
+            product.fat = args.get("fat", product.fat)
+            product.carbs = args.get("carbs", product.carbs)
+            product.source = "corrected"
+            product.corrections_count += 1
+            action = "updated"
+        else:
+            product = Product(
+                name=normalized,
+                display_name=display_name,
+                calories=args.get("calories", 0),
+                protein=args.get("protein", 0),
+                fat=args.get("fat", 0),
+                carbs=args.get("carbs", 0),
+                user_id=args.get("user_id"),
+                source="llm"
+            )
+            session.add(product)
+            action = "created"
+
+        await session.commit()
+        await session.refresh(product)
+
+    return {
+        "success": True,
+        "action": action,
+        "product_id": product.id,
+        "name": product.display_name,
+        "calories_per_100g": product.calories,
+        "protein_per_100g": product.protein,
+        "fat_per_100g": product.fat,
+        "carbs_per_100g": product.carbs
+    }
+
+
 async def _tool_analyze_food_text(args: dict) -> dict:
-    client = AsyncGroq(api_key=GROQ_API_KEY)
-    prompt = f"""Проанализируй еду и верни ТОЛЬКО JSON без пояснений.
+    """LLM-анализ еды через GigaChat."""
+    client = get_gigachat_client()
+    prompt = f"""Проанализируй еду. Верни КБЖУ НА 100 ГРАММ продукта.
+Верни ТОЛЬКО JSON без пояснений.
 Еда: {args['text']}
-Формат (один объект или массив если несколько блюд):
-{{ "name": "название", "weight": 150, "calories": 300, "protein": 20, "fat": 10, "carbs": 30}}"""
-    response = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+Формат:
+{{ "name": "название", "calories_per_100g": 150, "protein_per_100g": 10, "fat_per_100g": 5, "carbs_per_100g": 20, "estimated_weight": 150 }}"""
+
+    response = client.chat(
+        model="GigaChat",
         messages=[
-            {"role": "system", "content": "Отвечай только валидным JSON без markdown и пояснений."},
+            {"role": "system", "content": "Отвечай только валидным JSON без markdown."},
             {"role": "user", "content": prompt}
         ],
         temperature=0.2,
-        max_tokens=600
+        max_tokens=400
     )
 
     raw = response.choices[0].message.content.strip()
@@ -257,17 +371,6 @@ async def _tool_analyze_food_text(args: dict) -> dict:
         start, end = raw.find('{'), raw.rfind('}') + 1
 
     data = json.loads(raw[start:end])
-
-    if isinstance(data, list):
-        return {
-            "name": ", ".join(d.get("name", "") for d in data),
-            "weight": sum(d.get("weight", 0) for d in data),
-            "calories": sum(d.get("calories", 0) for d in data),
-            "protein": sum(d.get("protein", 0) for d in data),
-            "fat": sum(d.get("fat", 0) for d in data),
-            "carbs": sum(d.get("carbs", 0) for d in data),
-            "items": data
-        }
     return data
 
 
@@ -293,14 +396,9 @@ async def _tool_get_today_meals(args: dict) -> dict:
 
     meal_list = [
         {
-            "id": m.id,
-            "name": m.name,
-            "meal_type": m.meal_type,
-            "calories": m.calories,
-            "protein": m.protein,
-            "fat": m.fat,
-            "carbs": m.carbs,
-            "weight": m.weight
+            "id": m.id, "name": m.name, "meal_type": m.meal_type,
+            "calories": m.calories, "protein": m.protein,
+            "fat": m.fat, "carbs": m.carbs, "weight": m.weight
         }
         for m in meals
     ]
@@ -330,11 +428,8 @@ async def _tool_get_user_goal(args: dict) -> dict:
         return {"calories": 2000, "protein": 100, "fat": 70, "carbs": 250, "is_default": True}
 
     return {
-        "calories": goal.calories,
-        "protein": goal.protein,
-        "fat": goal.fat,
-        "carbs": goal.carbs,
-        "is_default": False
+        "calories": goal.calories, "protein": goal.protein,
+        "fat": goal.fat, "carbs": goal.carbs, "is_default": False
     }
 
 
@@ -425,13 +520,11 @@ async def _tool_delete_last_meal(args: dict) -> dict:
 async def _tool_analyze_meal_quality(args: dict) -> dict:
     today_data = await _tool_get_today_meals(args)
     goal_data = await _tool_get_user_goal(args)
-
     totals = today_data["totals"]
     meals = today_data["meals"]
     goal = goal_data
 
-    def pct(actual, target):
-        return round((actual / target * 100) if target else 0, 1)
+    def pct(a, t): return round((a / t * 100) if t else 0, 1)
 
     cal_pct = pct(totals["calories"], goal["calories"])
     prot_pct = pct(totals["protein"], goal["protein"])
@@ -439,44 +532,27 @@ async def _tool_analyze_meal_quality(args: dict) -> dict:
     carb_pct = pct(totals["carbs"], goal["carbs"])
 
     meal_types_logged = list({m["meal_type"] for m in meals})
-    missing_types = [t for t in ["breakfast", "lunch", "dinner"] if t not in meal_types_logged]
+    missing = [t for t in ["breakfast", "lunch", "dinner"] if t not in meal_types_logged]
 
     issues = []
-    if cal_pct < 50:
-        issues.append("критически мало калорий")
-    elif cal_pct < 80:
-        issues.append("недобор калорий")
-    elif cal_pct > 120:
-        issues.append("перебор калорий")
-
-    if prot_pct < 70:
-        issues.append(f"мало белка ({totals['protein']}г из {goal['protein']}г)")
-    if fat_pct > 130:
-        issues.append(f"перебор жиров ({totals['fat']}г при норме {goal['fat']}г)")
-    if carb_pct > 130:
-        issues.append(f"перебор углеводов ({totals['carbs']}г при норме {goal['carbs']}г)")
+    if cal_pct < 50: issues.append("критически мало калорий")
+    elif cal_pct < 80: issues.append("недобор калорий")
+    elif cal_pct > 120: issues.append("перебор калорий")
+    if prot_pct < 70: issues.append(f"мало белка ({totals['protein']}г из {goal['protein']}г)")
+    if fat_pct > 130: issues.append(f"перебор жиров ({totals['fat']}г)")
+    if carb_pct > 130: issues.append(f"перебор углеводов ({totals['carbs']}г)")
 
     return {
-        "totals": totals,
-        "goal": goal,
-        "percentages": {
-            "calories": cal_pct,
-            "protein": prot_pct,
-            "fat": fat_pct,
-            "carbs": carb_pct
-        },
-        "meals_count": len(meals),
-        "meal_types_logged": meal_types_logged,
-        "missing_main_meals": missing_types,
-        "issues": issues,
-        "meals_list": [m["name"] for m in meals]
+        "totals": totals, "goal": goal,
+        "percentages": {"calories": cal_pct, "protein": prot_pct, "fat": fat_pct, "carbs": carb_pct},
+        "meals_count": len(meals), "missing_main_meals": missing,
+        "issues": issues, "meals_list": [m["name"] for m in meals]
     }
 
 
 async def _tool_suggest_meal(args: dict) -> dict:
     today_data = await _tool_get_today_meals(args)
     goal_data = await _tool_get_user_goal(args)
-
     totals = today_data["totals"]
     goal = goal_data
 
@@ -487,15 +563,11 @@ async def _tool_suggest_meal(args: dict) -> dict:
         "carbs": round(goal["carbs"] - totals["carbs"], 1),
     }
 
-    meal_type = args.get("meal_type", "any")
-    already_eaten = [m["name"] for m in today_data["meals"]]
-
     return {
         "remaining_nutrients": remaining,
-        "meal_type_requested": meal_type,
-        "already_eaten_today": already_eaten,
-        "goal": goal,
-        "totals_so_far": totals
+        "meal_type_requested": args.get("meal_type", "any"),
+        "already_eaten_today": [m["name"] for m in today_data["meals"]],
+        "goal": goal, "totals_so_far": totals
     }
 
 
@@ -513,8 +585,7 @@ async def _tool_compare_with_yesterday(args: dict) -> dict:
         async with async_session() as session:
             result = await session.execute(
                 select(Meal).where(
-                    Meal.user_id == args["user_id"],
-                    Meal.date == date_str
+                    Meal.user_id == args["user_id"], Meal.date == date_str
                 )
             )
             meals = result.scalars().all()
@@ -529,8 +600,7 @@ async def _tool_compare_with_yesterday(args: dict) -> dict:
     today_totals = await get_day_totals(today.isoformat())
     yesterday_totals = await get_day_totals(yesterday.isoformat())
 
-    def delta(a, b):
-        return round(a - b, 1)
+    def delta(a, b): return round(a - b, 1)
 
     return {
         "today": {"date": today.isoformat(), **today_totals},
@@ -546,35 +616,29 @@ async def _tool_compare_with_yesterday(args: dict) -> dict:
 
 
 async def _tool_generate_human_feedback(args: dict) -> str:
-    """Генерирует человеческий комментарий по качеству питания."""
     total = args.get('total_calories', 0)
     protein = args.get('protein', 0)
     fats = args.get('fats', 0)
     carbs = args.get('carbs', 0)
     remaining = args.get('remaining_calories', 0)
 
-    comments = []
-
     if total == 0:
         return "Пока ничего не съел, начинай день!"
 
-    if carbs > 150:
-        comments.append("многовато углеводов сегодня 🍞")
-    if protein < 30:
-        comments.append("маловато белка, добавь мясо/рыбу 🥩")
-    if fats > 80:
-        comments.append("жиров перебор, осторожнее с маслом 🥑")
-    if 0 < remaining < 200:
-        comments.append("почти уложился в норму! 👍")
-
-    if not comments:
-        comments.append("всё отлично, так держать! 💪")
+    comments = []
+    if carbs > 150: comments.append("многовато углеводов сегодня 🍞")
+    if protein < 30: comments.append("маловато белка 🥩")
+    if fats > 80: comments.append("жиров перебор 🥑")
+    if 0 < remaining < 200: comments.append("почти уложился в норму! 👍")
+    if not comments: comments.append("всё отлично, так держать! 💪")
 
     return " ".join(comments)
 
 
 # ─── Tool dispatcher ──────────────────────────────────────────────────────────
 TOOL_EXECUTORS = {
+    "search_product": _tool_search_product,
+    "save_product": _tool_save_product,
     "analyze_food_text": _tool_analyze_food_text,
     "get_today_meals": _tool_get_today_meals,
     "get_user_goal": _tool_get_user_goal,
@@ -607,7 +671,7 @@ async def run_agent(
     history: list[dict],
     photo_base64: str | None = None
 ) -> str:
-    client = AsyncGroq(api_key=GROQ_API_KEY)
+    client = get_gigachat_client()
 
     if photo_base64:
         vision_result = await _analyze_photo_with_vision(client, photo_base64, message)
@@ -623,11 +687,9 @@ async def run_agent(
     messages.extend(history[-10:])
     messages.append({"role": "user", "content": user_content_for_agent})
 
-    max_iterations = 8
-
-    for _ in range(max_iterations):
-        response = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+    for _ in range(8):
+        response = client.chat(
+            model="GigaChat",
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
@@ -646,14 +708,8 @@ async def run_agent(
             "role": "assistant",
             "content": choice.message.content,
             "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments
-                    }
-                }
+                {"id": tc.id, "type": "function",
+                 "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                 for tc in tool_calls
             ]
         })
@@ -677,28 +733,20 @@ async def run_agent(
     return "Не удалось обработать запрос. Попробуй ещё раз."
 
 
-async def _analyze_photo_with_vision(client: AsyncGroq, photo_base64: str, hint: str = "") -> str:
-    response = await client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Проанализируй фото еды. Верни ТОЛЬКО JSON:\n"
-                            '{ "name": "блюдо", "weight": 200, "calories": 300, "protein": 24, "fat": 10, "carbs": 36}\n'
-                            f"Подсказка от пользователя: {hint or 'нет'}"
-                        )
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{photo_base64}"}
-                    }
-                ]
-            }
-        ],
+async def _analyze_photo_with_vision(client, photo_base64: str, hint: str = "") -> str:
+    response = client.chat(
+        model="GigaChat",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": (
+                    "Проанализируй фото еды. Верни КБЖУ НА 100 ГРАММ:\n"
+                    '{ "name": "блюдо", "calories_per_100g": 150, "protein_per_100g": 10, "fat_per_100g": 5, "carbs_per_100g": 20, "estimated_weight": 200}\n'
+                    f"Подсказка: {hint or 'нет'}"
+                )},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{photo_base64}"}}
+            ]
+        }],
         max_tokens=300,
         temperature=0.2
     )
