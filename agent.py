@@ -12,51 +12,59 @@ from config import GIGACHAT_CREDENTIALS
 logger = logging.getLogger(__name__)
 
 
+import httpx
+import uuid
+from config import GIGACHAT_CREDENTIALS
+
+
 async def _gigachat_chat(messages: list, tools: list = None, temperature: float = 0.4, max_tokens: int = 1200):
     """Прямой вызов GigaChat API через HTTP (асинхронно)."""
-    import ssl
-    
-    # Создаём SSL контекст без проверки сертификатов
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-    
-    # Создаём httpx клиент с отключенной проверкой SSL
+    # Отключаем проверку SSL для Railway
     async with httpx.AsyncClient(verify=False) as client:
-        # Получаем токен
+        # 1. Получаем access token
         token_resp = await client.post(
             "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
             headers={
-                "Authorization": f"Basic {GIGACHAT_CREDENTIALS}",
-                "RqUID": "12345678-1234-1234-1234-123456789012",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+                "RqUID": str(uuid.uuid4()),
+                "Authorization": f"Basic {GIGACHAT_CREDENTIALS}"
             },
             data={"scope": "GIGACHAT_API_PERS"}
         )
-        token = token_resp.json()["tok"]
+        
+        if token_resp.status_code != 200:
+            raise Exception(f"Failed to get token: {token_resp.text}")
+        
+        access_token = token_resp.json()["access_token"]
 
-        # Формируем запрос
+        # 2. Формируем запрос к chat completions
         payload = {
             "model": "GigaChat",
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            "stream": False
         }
         
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        # Вызываем API
+        # 3. Вызываем API с access token
         response = await client.post(
             "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
             },
             json=payload,
             timeout=60.0
         )
+        
+        if response.status_code != 200:
+            raise Exception(f"GigaChat API error: {response.text}")
         
         return response.json()
 
