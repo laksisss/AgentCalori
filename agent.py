@@ -1,43 +1,89 @@
 """
 agent.py — ядро агента с GigaChat и базой продуктов.
 """
+import asyncio
 import json
 import logging
-import asyncio
 import re
+import httpx
 from gigachat import GigaChat
 from config import GIGACHAT_CREDENTIALS
 
 logger = logging.getLogger(__name__)
 
 
-def get_gigachat_client():
-    """Создаёт клиента GigaChat."""
-    return GigaChat(
-        credentials=GIGACHAT_CREDENTIALS,
-        verify_ssl_certs=False,
-        scope="GIGACHAT_API_PERS"
+async def _gigachat_chat(messages: list, tools: list = None, temperature: float = 0.4, max_tokens: int = 1200):
+    """Прямой вызов GigaChat API через HTTP (асинхронно)."""
+    # Получаем токен
+    async with httpx.AsyncClient() as client:
+        token_resp = await client.post(
+            "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+            headers={
+                "Authorization": f"Basic {GIGACHAT_CREDENTIALS}",
+                "RqUID": "12345678-1234-1234-1234-123456789012",
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            data={"scope": "GIGACHAT_API_PERS"}
+        )
+        token = token_resp.json()["tok"]
+
+        # Формируем запрос
+        payload = {
+            "model": "GigaChat",
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        # Вызываем API
+        response = await client.post(
+            "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=60.0
+        )
+        
+        return response.json()
+
+
+async def _tool_analyze_food_text(args: dict) -> dict:
+    """LLM-анализ еды через GigaChat."""
+    prompt = f"""Проанализируй еду. Верни КБЖУ НА 100 ГРАММ продукта.
+Верни ТОЛЬКО JSON без пояснений.
+Еда: {args['text']}
+Формат:
+{{ "name": "название", "calories_per_100g": 150, "protein_per_100g": 10, "fat_per_100g": 5, "carbs_per_100g": 20, "estimated_weight": 150 }}"""
+
+    response = await _gigachat_chat(
+        messages=[
+            {"role": "system", "content": "Отвечай только валидным JSON без markdown."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        max_tokens=400
     )
 
+    raw = response["choices"][0]["message"]["content"].strip()
+    if "```" in raw:
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
 
-async def _gigachat_chat(messages: list, tools: list = None, temperature: float = 0.4, max_tokens: int = 1200):
-    """Асинхронная обёртка над синхронным GigaChat SDK."""
-    client = get_gigachat_client()
-    loop = asyncio.get_event_loop()
-    
-    def _call():
-        kwargs = {
-            "messages": messages,  # ✅ есть
-            "temperature": temperature,  # ✅ есть
-            "max_tokens": max_tokens,  # ✅ есть
-            # ❌ УБЕРИ ЭТУ СТРОКУ: "model": "GigaChat",
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
-        return client.chat(**kwargs)
-    
-    return await loop.run_in_executor(None, _call)
+    if '[' in raw:
+        start, end = raw.find('['), raw.rfind(']') + 1
+    else:
+        start, end = raw.find('{'), raw.rfind('}') + 1
+
+    data = json.loads(raw[start:end])
+    return data
 
 
 # ─── Tools ────────────────────────────────────────────────────────────────────
