@@ -36,3 +36,20 @@ class Meal(Base):
     carbs = Column(Float)
     meal_type = Column(String, default="snack")
     created_at = Column(DateTime, server_default=func.now())
+
+
+class Product(Base):
+    """База продуктов — КБЖУ на 100г. Запоминаем навсегда!"""
+    __tablename__ = "products"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False, index=True)          # нормализованное имя
+    display_name = Column(String, nullable=False)              # как показал пользователь
+    calories = Column(Float, nullable=False)                    # на 100г
+    protein = Column(Float, nullable=False)
+    fat = Column(Float, nullable=False)
+    carbs = Column(Float, nullable=False)
+    user_id = Column(Integer, nullable=True, index=True)       # null = общий продукт
+    source = Column(String, default="user")                     # user | llm | corrected
+    corrections_count = Column(Integer, default=0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
