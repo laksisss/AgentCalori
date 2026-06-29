@@ -1,18 +1,11 @@
 """
-bot.py — переписанная точка входа.
-
-Что изменилось vs оригинал:
-- Убраны ConversationHandler (SELECT_MEAL_TYPE, PHOTO_CONFIRM)
-- Убраны handlers/meal.py и handlers/photo.py из импортов
-- Добавлен единый agent_handler
-- Добавлена команда /clear (сброс истории диалога)
-- Исправлен PTBUserWarning (per_message)
-- Исправлен 409 Conflict (drop_pending_updates=True)
+bot.py — точка входа с graceful shutdown и очисткой webhook.
 """
 
 import asyncio
 import sys
 import os
+import signal
 import logging
 import json
 import uvicorn
@@ -32,6 +25,15 @@ from web_app import app as fastapi_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# ─── Graceful shutdown ────────────────────────────────────────────────────────
+shutdown_event = asyncio.Event()
+
+def signal_handler(sig, frame):
+    """Обработчик сигналов SIGTERM/SIGINT для graceful shutdown."""
+    logger.info(f"🛑 Получен сигнал {sig}, завершаю работу...")
+    shutdown_event.set()
 
 
 async def clear_command(update: Update, context) -> None:
@@ -75,17 +77,30 @@ async def error_handler(update: object, context) -> None:
     logger.error(f"Ошибка: {context.error}", exc_info=context.error)
 
 
+async def post_init(application: Application) -> None:
+    """Выполняется при инициализации бота — очищает webhook."""
+    logger.info("🧹 Удаляю webhook если был установлен...")
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("✅ Webhook удалён, запускаю polling...")
+
+
 async def run_bot(application):
+    """Запускает polling и ждёт сигнала остановки."""
     logger.info("✅ Бот запущен!")
     await application.updater.start_polling(
         allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True  # исправляет 409 Conflict при редеплое
+        drop_pending_updates=True
     )
-    while True:
-        await asyncio.sleep(1)
+    
+    # Ждём сигнала остановки
+    await shutdown_event.wait()
+    
+    logger.info("🛑 Останавливаю бота...")
+    await application.updater.stop()
 
 
 async def run_fastapi():
+    """Запускает FastAPI сервер."""
     port = int(os.getenv("PORT", 8080))
     config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
@@ -93,15 +108,24 @@ async def run_fastapi():
 
 
 async def main():
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
     await init_db()
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_init)  # очищает webhook при старте
+        .build()
+    )
 
     # Команды
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("goal", set_goal))
     application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("clear", clear_command))  # новая команда
+    application.add_handler(CommandHandler("clear", clear_command))
 
     # Callback кнопки меню
     application.add_handler(CallbackQueryHandler(menu_callback))
@@ -127,17 +151,26 @@ async def main():
     bot_task = asyncio.create_task(run_bot(application))
     fastapi_task = asyncio.create_task(run_fastapi())
 
+    # Ждём завершения любой задачи
     done, pending = await asyncio.wait(
         [bot_task, fastapi_task],
         return_when=asyncio.FIRST_COMPLETED
     )
 
+    # Отменяем оставшиеся задачи
     for task in pending:
         task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
+    # Graceful shutdown
+    logger.info("🛑 Завершаю работу приложения...")
     await application.updater.stop()
     await application.stop()
     await application.shutdown()
+    logger.info("✅ Приложение остановлено.")
 
 
 if __name__ == "__main__":
