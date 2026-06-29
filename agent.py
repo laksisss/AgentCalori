@@ -3,9 +3,9 @@ agent.py — ядро агента с GigaChat и базой продуктов.
 """
 import json
 import logging
+import asyncio
 import re
 from gigachat import GigaChat
-from gigachat.models import Messages
 from config import GIGACHAT_CREDENTIALS
 
 logger = logging.getLogger(__name__)
@@ -13,10 +13,34 @@ logger = logging.getLogger(__name__)
 
 def get_gigachat_client():
     """Создаёт клиента GigaChat."""
-    return GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False)
+    return GigaChat(
+        credentials=GIGACHAT_CREDENTIALS,
+        verify_ssl_certs=False,
+        scope="GIGACHAT_API_PERS"
+    )
 
 
-# ─── Tools ───────────────────────────────────────────────────────────────────
+async def _gigachat_chat(messages: list, tools: list = None, temperature: float = 0.4, max_tokens: int = 1200):
+    """Асинхронная обёртка над синхронным GigaChat SDK."""
+    client = get_gigachat_client()
+    loop = asyncio.get_event_loop()
+    
+    def _call():
+        kwargs = {
+            "model": "GigaChat",
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        return client.chat(**kwargs)
+    
+    return await loop.run_in_executor(None, _call)
+
+
+# ─── Tools ────────────────────────────────────────────────────────────────────
 TOOLS = [
     {
         "type": "function",
@@ -341,15 +365,13 @@ async def _tool_save_product(args: dict) -> dict:
 
 async def _tool_analyze_food_text(args: dict) -> dict:
     """LLM-анализ еды через GigaChat."""
-    client = get_gigachat_client()
     prompt = f"""Проанализируй еду. Верни КБЖУ НА 100 ГРАММ продукта.
 Верни ТОЛЬКО JSON без пояснений.
 Еда: {args['text']}
 Формат:
 {{ "name": "название", "calories_per_100g": 150, "protein_per_100g": 10, "fat_per_100g": 5, "carbs_per_100g": 20, "estimated_weight": 150 }}"""
 
-    response = client.chat(
-        model="GigaChat",
+    response = await _gigachat_chat(
         messages=[
             {"role": "system", "content": "Отвечай только валидным JSON без markdown."},
             {"role": "user", "content": prompt}
@@ -671,10 +693,8 @@ async def run_agent(
     history: list[dict],
     photo_base64: str | None = None
 ) -> str:
-    client = get_gigachat_client()
-
     if photo_base64:
-        vision_result = await _analyze_photo_with_vision(client, photo_base64, message)
+        vision_result = await _analyze_photo_with_vision(photo_base64, message)
         user_content_for_agent = (
             f"[Фото еды] Результат анализа: {vision_result}\n"
             f"Пользователь: {message or 'Определи и сохрани'}"
@@ -688,14 +708,7 @@ async def run_agent(
     messages.append({"role": "user", "content": user_content_for_agent})
 
     for _ in range(8):
-        response = client.chat(
-            model="GigaChat",
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.4,
-            max_tokens=1200
-        )
+        response = await _gigachat_chat(messages, TOOLS)
 
         choice = response.choices[0]
 
@@ -733,9 +746,8 @@ async def run_agent(
     return "Не удалось обработать запрос. Попробуй ещё раз."
 
 
-async def _analyze_photo_with_vision(client, photo_base64: str, hint: str = "") -> str:
-    response = client.chat(
-        model="GigaChat",
+async def _analyze_photo_with_vision(photo_base64: str, hint: str = "") -> str:
+    response = await _gigachat_chat(
         messages=[{
             "role": "user",
             "content": [
